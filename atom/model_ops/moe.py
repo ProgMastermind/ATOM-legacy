@@ -14,7 +14,7 @@ from aiter.fused_moe import fused_moe
 from aiter.jit.utils.chip_info import get_gfx
 from aiter.jit.utils.torch_guard import torch_compile_guard
 from aiter.ops.flydsl.moe_common import GateMode
-from aiter.ops.shuffle import moe_shuffle_scale, shuffle_weight
+from aiter.ops.shuffle import shuffle_weight
 from atom.config import (
     Config,
     QuantizationConfig,
@@ -1036,6 +1036,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
 
+        from aiter.ops.shuffle import moe_shuffle_scale
+
         # shuffle scale
         w13_scale_2d = layer.w13_weight_scale.reshape(
             -1, layer.w13_weight_scale.shape[-1]
@@ -1949,6 +1951,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self._process_tensor_quant(layer)
 
     def _process_block_quant(self, layer: nn.Module) -> None:
+        from aiter.ops.shuffle import moe_shuffle_scale
+
         assert self.quant_config.is_dynamic
         self._normalize_weights_and_scales(layer)
 
