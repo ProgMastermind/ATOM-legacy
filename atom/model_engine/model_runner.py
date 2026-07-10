@@ -841,7 +841,6 @@ class ModelRunner:
             distributed_init_method=distributed_init_method,
             data_parallel_size=config.parallel_config.data_parallel_size,
             data_parallel_rank=config.parallel_config.data_parallel_rank,
-            prefill_context_model_parallel_size=config.prefill_context_parallel_size,
         )
 
     def _make_buffer(
