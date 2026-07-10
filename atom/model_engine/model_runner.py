@@ -182,6 +182,7 @@ class tokenIDProcessor:
         self.prev_draft_token_ids: Optional[torch.Tensor] = None
         self.prev_rejected_num: Optional[torch.Tensor] = None
         self.prev_bonus_num: Optional[torch.Tensor] = None
+        self.num_rejected: Optional[np.ndarray] = None
 
         self.pre_num_decode_token_per_seq = 1
         self.draft_token_ids: Optional[torch.Tensor] = None
@@ -312,6 +313,8 @@ class tokenIDProcessor:
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids.
         """
+        self.num_rejected = batch.num_rejected
+
         scheduled_tokens = batch.scheduled_tokens  # tokens per req
         total_tokens = batch.total_tokens_num
         total_tokens_prefill = batch.total_tokens_num_prefill
