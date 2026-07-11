@@ -255,10 +255,6 @@ class AiterAttentionMetadataBuilder(CommonAttentionBuilder):
                 reduce_partial_map_type,
             )
 
-    @property
-    def prep_stream(self):
-        return self.model_runner.async_execute_stream
-
     _NUM_TBO_UBATCHES = 2
 
     def _allocate_ubatch_buffers(
@@ -1081,29 +1077,20 @@ class AiterAttentionMetadataBuilder(CommonAttentionBuilder):
             ("kv_indptr", bs + 1),
         ]
 
-        # Copy metadata to GPU on a separate prep_stream so the H2D copies
-        # overlap with the previous step's GPU graph on the default stream.
-        # Same pattern as AiterMLA / DeepseekV4 backends.
-        prep_stream = self.prep_stream
-        current_stream = torch.cuda.current_stream()
-        prep_stream.wait_stream(current_stream)
-        with torch.cuda.stream(prep_stream):
-            ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
-            if self.block_size in (256, 1024):
-                ctx_pa_ps = self.set_aiter_persistent_worker_buffers(bs)
-                ctx.update(ctx_pa_ps)
+        ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
+        if self.block_size in (256, 1024):
+            ctx_pa_ps = self.set_aiter_persistent_worker_buffers(bs)
+            ctx.update(ctx_pa_ps)
 
-            ctx["kv_indices"] = var["kv_indices"].gpu
-            max_seqlen_k = context_lens.max()
-            kv_indices_generate_triton(
-                ctx["block_tables"],
-                ctx["kv_indices"],
-                ctx["kv_indptr"],
-                self.block_ratio,
-                max_seqlen_k,
-            )
-        # Sync: wait for prep_stream copies to finish before building metadata
-        current_stream.wait_stream(prep_stream)
+        ctx["kv_indices"] = var["kv_indices"].gpu
+        max_seqlen_k = context_lens.max()
+        kv_indices_generate_triton(
+            ctx["block_tables"],
+            ctx["kv_indices"],
+            ctx["kv_indptr"],
+            self.block_ratio,
+            max_seqlen_k,
+        )
         attn_metadata = AttentionMetaData(
             dropout_p=dropout_p,
             max_seqlen_q=max_seqlen_q,
