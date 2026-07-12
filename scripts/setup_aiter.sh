@@ -12,6 +12,12 @@ export AITER_LOG_LEVEL=WARNING
 export HF_HOME=/workspace/huggingface_cache
 export GPU_ARCHS=gfx942
 export PREBUILD_KERNELS=0
+export HSA_NO_SCRATCH_RECLAIM=1
+export NCCL_P2P_DISABLE=1
+
+# persist in .bashrc so future terminals also have them
+grep -q "HSA_NO_SCRATCH_RECLAIM" ~/.bashrc 2>/dev/null || echo 'export HSA_NO_SCRATCH_RECLAIM=1' >> ~/.bashrc
+grep -q "NCCL_P2P_DISABLE" ~/.bashrc 2>/dev/null || echo 'export NCCL_P2P_DISABLE=1' >> ~/.bashrc
 
 echo "=== build aiter from ROCm/aiter main ==="
 cd /app/aiter-test
