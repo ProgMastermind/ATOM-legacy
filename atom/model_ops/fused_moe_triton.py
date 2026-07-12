@@ -27,10 +27,17 @@ from atom.utils import envs
 
 if envs.ATOM_USE_TRITON_GEMM or envs.ATOM_USE_TRITON_MOE:
     from aiter.ops.triton.moe.moe_routing.routing import routing
-    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import (
-        moe_gemm_a8w4,
-        swizzle_scales as swizzle_scales_a8w4,
-    )
+    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    try:
+        from aiter.ops.triton.moe.moe_op_gemm_a8w4 import (
+            swizzle_scales as swizzle_scales_a8w4,
+        )
+    except ImportError:
+        # aiter 0.1.16 tag does not export swizzle_scales from a8w4; a16w4's
+        # implementation is dtype-agnostic and safe for the FP8 scale layout.
+        from aiter.ops.triton.moe.moe_op_gemm_a16w4 import (
+            swizzle_scales as swizzle_scales_a8w4,
+        )
     from aiter.ops.triton.moe.moe_op_gemm_a16w4 import (
         moe_gemm_a16w4,
     )
