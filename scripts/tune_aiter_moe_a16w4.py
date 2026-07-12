@@ -9,7 +9,7 @@ Changes:
 - num_warps 4 -> 8
 - block_k  256 -> 128
 - num_stages 1 -> 2
-- allow block_n to reduce to 16 (was stopping at 32)
+- keep block_n >= 32 so unswizzle_mx_scale_cdna4 can use BLOCK_N // 32
 """
 import os
 import shutil
@@ -54,7 +54,7 @@ def patch():
         grid_m = routing_data.n_blocks(m, block_m)
         grid_n = triton.cdiv(n, block_n)
         grid = grid_m * grid_n * split_k
-        while block_n >= 32 and grid < 256:
+        while block_n >= 64 and grid < 256:
             block_n = block_n // 2
             grid_m = routing_data.n_blocks(m, block_m)
             grid_n = triton.cdiv(n, block_n)
