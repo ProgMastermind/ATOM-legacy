@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>GPU MoE Tuning Visual Explanation</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+      margin: 0;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    h1, h2, h3 {
+      color: #1a1a1a;
+    }
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 2rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+    }
+    .section {
+      margin-bottom: 3rem;
+      border-bottom: 1px solid #e9ecef;
+      padding-bottom: 2rem;
+    }
+    .section:last-child {
+      border-bottom: none;
+    }
+    .grid {
+      display: inline-grid;
+      gap: 2px;
+      margin: 1rem 0;
+      border: 2px solid #333;
+      padding: 4px;
+      background: #fff;
+    }
+    .cell {
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      border: 1px solid #dee2e6;
+      background: #e9ecef;
+    }
+    .cell.active {
+      background: #0d6efd;
+      color: #fff;
+      border-color: #0d6efd;
+    }
+    .cell.masked {
+      background: #f8f9fa;
+      color: #adb5bd;
+    }
+    .label {
+      font-size: 0.85rem;
+      color: #495057;
+      margin-top: 0.5rem;
+    }
+    .box {
+      display: inline-block;
+      border: 2px solid #333;
+      padding: 1rem;
+      margin: 0.5rem;
+      background: #f8f9fa;
+      border-radius: 4px;
+      vertical-align: top;
+    }
+    .cu {
+      background: #fff3cd;
+      border-color: #ffc107;
+      min-width: 280px;
+      min-height: 160px;
+      position: relative;
+    }
+    .block {
+      background: #d1e7dd;
+      border-color: #198754;
+      padding: 0.5rem;
+      margin: 0.25rem;
+      display: inline-block;
+      font-size: 0.85rem;
+      width: 90px;
+      text-align: center;
+      border-radius: 4px;
+    }
+    .block.heavy {
+      background: #f8d7da;
+      border-color: #dc3545;
+      width: 140px;
+      height: 80px;
+    }
+    .warp {
+      display: inline-block;
+      background: #cfe2ff;
+      border: 1px solid #0d6efd;
+      padding: 0.25rem 0.5rem;
+      margin: 2px;
+      font-size: 0.75rem;
+      border-radius: 3px;
+    }
+    .buffer {
+      display: inline-block;
+      width: 80px;
+      height: 30px;
+      line-height: 30px;
+      text-align: center;
+      border: 1px solid #333;
+      margin: 2px;
+      background: #e2e3e5;
+      font-size: 0.8rem;
+    }
+    .buffer.double {
+      background: #f8d7da;
+      border-color: #dc3545;
+    }
+    .bus {
+      border: 3px solid #333;
+      padding: 1rem;
+      display: inline-block;
+      margin: 1rem;
+      background: #fff;
+      border-radius: 8px;
+    }
+    .seat {
+      display: inline-block;
+      width: 30px;
+      height: 30px;
+      line-height: 30px;
+      text-align: center;
+      border: 1px solid #333;
+      margin: 2px;
+      background: #e9ecef;
+      font-size: 0.7rem;
+    }
+    .seat.passenger {
+      background: #0d6efd;
+      color: #fff;
+    }
+    .seat.driver {
+      background: #198754;
+      color: #fff;
+    }
+    .toolbox {
+      display: inline-block;
+      width: 20px;
+      height: 15px;
+      background: #fd7e14;
+      border: 1px solid #333;
+      margin: 0 1px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1rem;
+    }
+    th, td {
+      border: 1px solid #dee2e6;
+      padding: 0.6rem;
+      text-align: left;
+    }
+    th {
+      background: #e9ecef;
+    }
+    .arrow {
+      font-size: 1.2rem;
+      color: #6c757d;
+      margin: 0 1rem;
+    }
+    .code {
+      background: #f8f9fa;
+      border: 1px solid #dee2e6;
+      padding: 0.5rem;
+      font-family: monospace;
+      display: inline-block;
+      margin: 0.5rem 0;
+    }
+    .caption {
+      font-size: 0.85rem;
+      color: #6c757d;
+      margin: 0.5rem 0 1.5rem 0;
+    }
+    .flex {
+      display: flex;
+      align-items: flex-start;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+    .center {
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>GPU MoE Tuning Visual Explanation</h1>
+    <p>
+      Why <code>num_warps = 8</code> + <code>num_stages = 2</code> for the <code>block_m == 16</code> decode branch reduced throughput from <strong>~200 tok/s</strong> to <strong>~152 tok/s</strong>.
+    </p>
+
+    <div class="section">
+      <h2>1. Tile vs Real Tokens</h2>
+      <p>
+        <code>m = 1</code> is the actual number of tokens. <code>block_m = 16</code> is the Triton tile size. The kernel processes a 16-wide tile, but only 1 row has real work.
+      </p>
+      <div class="grid" style="grid-template-columns: repeat(16, 1fr);">
+        <!-- Row 1: active -->
+        <div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div><div class="cell active">1</div>
+        <!-- 15 masked rows -->
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+        <div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div><div class="cell masked">.</div>
+      </div>
+      <div class="caption">16x16 tile shown. Blue = 1 real token row, gray = masked rows.</div>
+      <p><code>block_m = 16</code> is the <strong>tile size</strong> (the bus). <code>m = 1</code> is the <strong>real token count</strong> (the passenger).</p>
+    </div>
+
+    <div class="section">
+      <h2>2. Why <code>block_n = 32</code>?</h2>
+      <p>
+        For decode <code>m = 1</code>, so <code>grid_m = 1</code>. The GPU needs many blocks to fill all 128 CUs. With <code>N = 4096</code>:
+      </p>
+      <div class="flex">
+        <div class="box center">
+          <strong>block_n = 128</strong>
+          <div class="code">grid_n = 4096 / 128 = 32</div>
+          <div>grid = 32 blocks</div>
+          <div style="margin-top:1rem; color:#dc3545;">Too few blocks</div>
+        </div>
+        <div class="box center">
+          <strong>block_n = 64</strong>
+          <div class="code">grid_n = 4096 / 64 = 64</div>
+          <div>grid = 64 blocks</div>
+          <div style="margin-top:1rem; color:#dc3545;">Still too few</div>
+        </div>
+        <div class="box center">
+          <strong>block_n = 32</strong>
+          <div class="code">grid_n = 4096 / 32 = 128</div>
+          <div>grid = 128 blocks</div>
+          <div style="margin-top:1rem; color:#198754;">Good</div>
+        </div>
+      </div>
+      <p>
+        <code>get_kernel_config</code> keeps halving <code>block_n</code> until <code>grid</code> is large enough. It stops at <code>32</code> because <code>unswizzle_mx_scale_cdna4</code> needs <code>block_n // 32 &gt;= 1</code>.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>3. GPU Hierarchy</h2>
+      <div class="box" style="background:#fff3cd; border-color:#ffc107; width:100%;">
+        <strong>GPU</strong> (MI300X)
+        <div style="margin-left:2rem;">
+          <div class="box cu">
+            <strong>CU 1</strong> (Compute Unit)
+            <div class="box" style="background:#d1e7dd; border-color:#198754;">
+              <strong>Block 1</strong>
+              <div style="margin:0.5rem 0;">
+                <span class="warp">Warp 1</span>
+                <span class="warp">Warp 2</span>
+                <span class="warp">...</span>
+              </div>
+              <div>Each warp has 64 threads</div>
+            </div>
+            <div class="box" style="background:#d1e7dd; border-color:#198754;">
+              <strong>Block 2</strong>
+            </div>
+          </div>
+          <div class="box cu">
+            <strong>CU 2</strong>
+            <div class="box" style="background:#d1e7dd; border-color:#198754;">Block 3</div>
+          </div>
+          <div class="box cu" style="background:#e9ecef; border-color:#adb5bd; text-align:center; line-height:120px;">
+            ... 128 CUs ...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>4. <code>num_warps</code> Comparison for <code>16x32</code> Tile</h2>
+      <p>
+        Tile has <code>16 * 32 = 512</code> output elements. Total work is fixed.
+      </p>
+      <div class="flex">
+        <div class="box center">
+          <strong>num_warps = 4</strong>
+          <div class="code">128 threads</div>
+          <div class="code">512 / 128 = 4 elements per thread</div>
+          <div style="margin-top:1rem;">
+            <span class="warp">Warp 1</span>
+            <span class="warp">Warp 2</span>
+            <span class="warp">Warp 3</span>
+            <span class="warp">Warp 4</span>
+          </div>
+          <div style="margin-top:1rem; color:#198754;">Each thread has enough work</div>
+        </div>
+        <div class="box center">
+          <strong>num_warps = 8</strong>
+          <div class="code">256 threads</div>
+          <div class="code">512 / 256 = 2 elements per thread</div>
+          <div style="margin-top:1rem;">
+            <span class="warp">W1</span><span class="warp">W2</span><span class="warp">W3</span><span class="warp">W4</span>
+            <span class="warp">W5</span><span class="warp">W6</span><span class="warp">W7</span><span class="warp">W8</span>
+          </div>
+          <div style="margin-top:1rem; color:#dc3545;">More threads, same work, more overhead</div>
+        </div>
+      </div>
+      <p>
+        <code>num_warps = 8</code> does not speed up the kernel because the tile is only 16 rows wide. The vector dot instruction is limited by the small <code>block_m = 16</code> dimension. More warps just split the same small work into smaller pieces.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>5. <code>num_stages</code> Comparison</h2>
+      <p>
+        <code>num_stages</code> controls how many <code>block_k</code> tiles are prefetched into registers.
+      </p>
+      <div class="flex">
+        <div class="box center">
+          <strong>num_stages = 1</strong>
+          <div style="margin-top:1rem;">
+            <div class="buffer">current block_k</div>
+          </div>
+          <div style="margin-top:1rem; color:#198754;">Small register footprint</div>
+        </div>
+        <div class="box center">
+          <strong>num_stages = 2</strong>
+          <div style="margin-top:1rem;">
+            <div class="buffer double">current block_k</div>
+            <div class="buffer double">next block_k</div>
+          </div>
+          <div style="margin-top:1rem; color:#dc3545;">2x register footprint</div>
+        </div>
+      </div>
+      <p>
+        With <code>block_k = 256</code>, each buffer is large. Holding two buffers per thread uses a lot more registers. This reduces how many blocks can fit on each CU.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>6. Occupancy: Why the Tuned Config Is Slower</h2>
+      <p>
+        A CU has a fixed register file and LDS. If each block uses more resources, fewer blocks fit on the CU.
+      </p>
+      <div class="flex">
+        <div class="box cu" style="min-height:200px;">
+          <strong>CU with baseline config</strong>
+          <div style="margin-top:1rem;">
+            <div class="block">Block A<br>4 warps<br>1 stage</div>
+            <div class="block">Block B<br>4 warps<br>1 stage</div>
+            <div class="block">Block C<br>4 warps<br>1 stage</div>
+            <div class="block">Block D<br>4 warps<br>1 stage</div>
+          </div>
+          <div style="margin-top:1rem; color:#198754;">High occupancy: 4 blocks fit</div>
+        </div>
+        <div class="box cu" style="min-height:200px;">
+          <strong>CU with tuned config</strong>
+          <div style="margin-top:1rem;">
+            <div class="block heavy">Block A<br>8 warps<br>2 stages</div>
+            <div class="block heavy">Block B<br>8 warps<br>2 stages</div>
+          </div>
+          <div style="margin-top:1rem; color:#dc3545;">Low occupancy: only 2 blocks fit</div>
+        </div>
+      </div>
+      <p>
+        <strong>Occupancy</strong> = number of blocks/warps that can run on a CU at the same time. Lower occupancy means the CU has fewer warps to switch to when one is waiting for memory. It sits idle, so throughput drops.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>7. Bus Analogy</h2>
+      <div class="flex">
+        <div class="bus center">
+          <strong>Baseline Bus</strong>
+          <div style="margin:1rem 0;">
+            <div class="seat passenger">P1</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+          </div>
+          <div>4 drivers</div>
+          <div style="margin:0.5rem 0;">
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+          </div>
+          <div>1 toolbox each</div>
+          <div style="margin:0.5rem 0;">
+            <span class="toolbox"></span>
+            <span class="toolbox"></span>
+            <span class="toolbox"></span>
+            <span class="toolbox"></span>
+          </div>
+          <div style="margin-top:1rem; color:#198754;">Efficient</div>
+        </div>
+        <div class="bus center">
+          <strong>Tuned Bus</strong>
+          <div style="margin:1rem 0;">
+            <div class="seat passenger">P1</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+            <div class="seat">.</div>
+          </div>
+          <div>8 drivers</div>
+          <div style="margin:0.5rem 0;">
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+            <span class="seat driver">D</span>
+          </div>
+          <div>2 toolboxes each</div>
+          <div style="margin:0.5rem 0;">
+            <span class="toolbox"></span><span class="toolbox"></span>
+            <span class="toolbox"></span><span class="toolbox"></span>
+            <span class="toolbox"></span><span class="toolbox"></span>
+            <span class="toolbox"></span><span class="toolbox"></span>
+          </div>
+          <div style="margin-top:1rem; color:#dc3545;">Crowded and slower</div>
+        </div>
+      </div>
+      <p>
+        The van (tile) is the same size. The passenger (real token) is the same. Extra drivers and extra toolboxes do not make the trip faster; they just waste space and resources.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>8. Summary</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Parameter</th>
+            <th>Baseline</th>
+            <th>Tuned</th>
+            <th>Effect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>block_m</code></td>
+            <td>16</td>
+            <td>16</td>
+            <td>Correct small-token tile</td>
+          </tr>
+          <tr>
+            <td><code>block_n</code></td>
+            <td>32</td>
+            <td>32</td>
+            <td>Chosen to get enough blocks</td>
+          </tr>
+          <tr>
+            <td><code>block_k</code></td>
+            <td>256</td>
+            <td>256</td>
+            <td>CDNA4 scales need multiple of 256</td>
+          </tr>
+          <tr>
+            <td><code>num_warps</code></td>
+            <td>4</td>
+            <td>8</td>
+            <td>Too many threads for 16x32 tile</td>
+          </tr>
+          <tr>
+            <td><code>num_stages</code></td>
+            <td>1</td>
+            <td>2</td>
+            <td>2x register use, reduced occupancy</td>
+          </tr>
+          <tr>
+            <td><strong>Throughput</strong></td>
+            <td><strong>~200 tok/s</strong></td>
+            <td><strong>~152 tok/s</strong></td>
+            <td>Tuned config is slower</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin-top:1.5rem;">
+        The <code>block_m = 16</code> and <code>block_n = 32</code> choices are correct. The slowdown came entirely from <code>num_warps = 8</code> + <code>num_stages = 2</code>.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>

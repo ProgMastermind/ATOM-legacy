@@ -18,6 +18,7 @@ export NCCL_P2P_DISABLE=1
 # persist in .bashrc so future terminals also have them
 grep -q "HSA_NO_SCRATCH_RECLAIM" ~/.bashrc 2>/dev/null || echo 'export HSA_NO_SCRATCH_RECLAIM=1' >> ~/.bashrc
 grep -q "NCCL_P2P_DISABLE" ~/.bashrc 2>/dev/null || echo 'export NCCL_P2P_DISABLE=1' >> ~/.bashrc
+grep -q "HF_HOME" ~/.bashrc 2>/dev/null || echo 'export HF_HOME=/workspace/huggingface_cache' >> ~/.bashrc
 
 echo "=== build aiter from ROCm/aiter main ==="
 cd /app/aiter-test
@@ -43,10 +44,6 @@ pip install -e . --no-build-isolation \
 echo "=== verify aiter has swizzle_scales ==="
 python -c "from aiter.ops.triton.moe.moe_op_gemm_a16w4 import swizzle_scales; print('OK a16w4 swizzle_scales')"
 
-echo "=== patch aiter moe_gemm_a16w4 get_kernel_config ==="
-cd /app/ATOM
-python scripts/tune_aiter_moe_a16w4.py
-
 echo "=== clear caches ==="
 rm -rf ~/.cache/atom/* ~/.cache/aiter/* ~/.triton/cache
 
@@ -57,4 +54,5 @@ python -m atom.entrypoints.openai_server \
   --kv_cache_dtype fp8 \
   --gpu-memory-utilization 0.5 \
   --host 0.0.0.0 \
-  --server-port 8000
+  --server-port 8000 \
+  "$@"
