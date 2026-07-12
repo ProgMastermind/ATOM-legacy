@@ -6,7 +6,8 @@ set -e
 # mine/main needs (swizzle_scales, swiglu_add_residual).
 
 echo "=== system / env setup ==="
-echo 0 > /proc/sys/kernel/numa_balancing
+# /proc/sys may be read-only in the pod; the NUMA-balancing warning is non-fatal
+echo 0 > /proc/sys/kernel/numa_balancing 2>/dev/null || echo "WARN: cannot disable NUMA balancing (read-only /proc/sys)"
 export AITER_LOG_LEVEL=WARNING
 export HF_HOME=/workspace/huggingface_cache
 export GPU_ARCHS=gfx942
