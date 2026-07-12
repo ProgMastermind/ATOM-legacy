@@ -20,8 +20,8 @@ git remote -v || true
 git remote set-url origin https://github.com/ROCm/aiter.git 2>/dev/null || \
     git remote add origin https://github.com/ROCm/aiter.git
 
-git fetch origin main
-git checkout -f -B main origin/main
+git fetch origin --tags
+git checkout -f -B aiter_v0163 v0.1.16.post3
 git submodule update --init --recursive
 
 echo "=== remove old aiter/flydsl packages that block reinstall ==="
