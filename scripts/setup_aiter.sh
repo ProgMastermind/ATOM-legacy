@@ -24,7 +24,13 @@ git fetch origin main
 git checkout -f -B main origin/main
 git submodule update --init --recursive
 
+echo "=== remove old aiter/flydsl packages that block reinstall ==="
+SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+pip uninstall amd-aiter -y 2>/dev/null || true
+rm -rf "${SITE}"/amd_aiter* "${SITE}"/aiter*egg* "${SITE}"/flydsl* 2>/dev/null || true
+
 # rebuild aiter C++ extension; the extra index is needed for flydsl/nightly deps
+echo "=== install aiter editable from /app/aiter-test ==="
 pip install -e . --no-build-isolation \
     --extra-index-url https://rocm.frameworks-devreleases.amd.com/whl-staging/gfx942-gfx950/
 
