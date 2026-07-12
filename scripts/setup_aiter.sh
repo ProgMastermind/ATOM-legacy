@@ -48,11 +48,5 @@ echo "=== clear caches ==="
 rm -rf ~/.cache/atom/* ~/.cache/aiter/* ~/.triton/cache
 
 echo "=== start server ==="
-export ATOM_USE_TRITON_MOE=1
-python -m atom.entrypoints.openai_server \
-  --model openai/gpt-oss-120b \
-  --kv_cache_dtype fp8 \
-  --gpu-memory-utilization 0.5 \
-  --host 0.0.0.0 \
-  --server-port 8000 \
-  "$@"
+cd /app/ATOM
+bash scripts/start_server.sh "$@"
