@@ -7,8 +7,8 @@ where /app/aiter-test is the aiter source checkout.
 
 Changes:
 - num_warps 4 -> 8
-- block_k  256 -> 128
 - num_stages 1 -> 2
+- keep block_k = 256 (CDNA4 swizzled scales need MX_SCALE_BLOCK_K = BLOCK_K // 32 to be a multiple of 8)
 - keep block_n >= 32 so unswizzle_mx_scale_cdna4 can use BLOCK_N // 32
 """
 import os
@@ -48,7 +48,6 @@ def patch():
     new_block = """    if block_m == 16:
         block_n = 128
         num_warps = 8
-        block_k = 128
         num_stages = 2
 
         grid_m = routing_data.n_blocks(m, block_m)
