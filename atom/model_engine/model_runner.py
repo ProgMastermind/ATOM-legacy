@@ -115,78 +115,117 @@ class tokenIDProcessor:
         )
         self.clean()
 
-    def stage_for_cpu(self, name: str, gpu_tensor: Optional[torch.Tensor]):
-        """Queue a GPU tensor to be copied to the host in the next batch send.
+    def send_to_cpu_async(
+        self,
+        gpu_tensor: torch.Tensor,
+        cpu_tensor_handle,
+        data_ready: torch.cuda.Event,
+        copy_done: Optional[torch.cuda.Event] = None,
+        gpu_logprobs: Optional[torch.Tensor] = None,
+    ):
+        copy_done = copy_done or torch.cuda.Event()
+        with torch.cuda.stream(self.async_copy_stream):
+            data_ready.wait(stream=self.async_copy_stream)
+            cpu_tensor = gpu_tensor.to("cpu", non_blocking=True)
+            cpu_logprobs = (
+                gpu_logprobs.to("cpu", non_blocking=True)
+                if gpu_logprobs is not None
+                else None
+            )
+            copy_done.record(self.async_copy_stream)
+        cpu_tensor_handle.append((cpu_tensor, copy_done))
+        self.logprobs_cpu.append(cpu_logprobs)
 
-        Callers accumulate results from the current step (sampled tokens, draft
-        tokens, mtp status) without launching any copies.  :meth:`send_batch_to_cpu`
-        issues a single D2H copy with one event for the whole batch.
+    def recv_async_output(self, cpu_tensor_handle) -> torch.Tensor:
+        if not cpu_tensor_handle:
+            return torch.empty(0, dtype=torch.int32, device="cpu")
+        cpu_tensor, event = cpu_tensor_handle.pop(0)
+        event.synchronize()
+        return cpu_tensor
+
+    def recv_logprobs(self) -> Optional[list[float]]:
+        """Pop and return the earliest logprobs from the async copy queue.
+        Must be called after recv_async_output (which synchronizes the event).
         """
-        if gpu_tensor is not None:
-            self._batch_gpu_tensors[name] = gpu_tensor
+        if not self.logprobs_cpu:
+            return None
+        logprob_tensor = self.logprobs_cpu.pop(0)
+        if logprob_tensor is not None:
+            return logprob_tensor.tolist()
+        return None
 
-    def send_batch_to_cpu(self, data_ready: torch.cuda.Event):
-        """Copy all staged GPU tensors to the host in one async operation.
+    def send_to_cpu_async_draft(self, gpu_tensor: torch.Tensor):
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self.async_copy_stream):
+            self.async_copy_stream.wait_stream(default_stream)
+            cpu_tensor = gpu_tensor.to("cpu", non_blocking=True)
+            event = torch.cuda.Event()
+            event.record(self.async_copy_stream)
+        self.draft_token_ids_cpu.append((cpu_tensor, event))
 
-        A single copy-done event covers the whole batch, so the next step only
-        synchronizes once instead of once per tensor.
-        """
-        if not self._batch_gpu_tensors:
-            return
+    def recv_async_output_draft(self) -> np.ndarray:
+        if not self.draft_token_ids_cpu:
+            return np.array([], dtype=np.int32)
+        token_ids, event = self.draft_token_ids_cpu.pop(0)
+        event.synchronize()
+        return token_ids.numpy()
+
+    def send_mtp_status_to_cpu_async(
+        self,
+        num_rejected: torch.Tensor,
+        num_bonus: torch.Tensor,
+        data_ready: torch.cuda.Event,
+    ):
+        # rejected num and bonus num are slightly different info for mtp
+        # take mtp=1 for example:
+        #   first decode after prefill have 0 rej, 0 bonus
+        #   prev acc decode have 0 rej, 1 bonus
+        #   prev rej decode have 1 rej, 0 bonus
+        # It is clear that only rejected number is not sufficient for all status tracking, bonus number is also needed.
+        # Single Event for both copies (vs. per-tensor send_to_cpu_async) so the
+        # consumer pops one queue entry and synchronizes once instead of twice.
         copy_done = torch.cuda.Event()
         with torch.cuda.stream(self.async_copy_stream):
             data_ready.wait(stream=self.async_copy_stream)
-            cpu_tensors = {
-                name: tensor.to("cpu", non_blocking=True)
-                for name, tensor in self._batch_gpu_tensors.items()
-            }
+            cpu_num_rejected = num_rejected.to("cpu", non_blocking=True)
+            cpu_num_bonus = num_bonus.to("cpu", non_blocking=True)
             copy_done.record(self.async_copy_stream)
-        self._pending_batch_copies.append((cpu_tensors, copy_done))
-        self._batch_gpu_tensors = {}
+        self.pending_mtp_status_copies.append(
+            (cpu_num_rejected, cpu_num_bonus, copy_done)
+        )
 
-    def recv_batch_from_cpu(self) -> dict[str, Optional[torch.Tensor]]:
-        """Drain the earliest batched D2H copy and return all CPU tensors.
-
-        Only one ``hipEventSynchronize`` is needed per engine step.
-        """
-        if not self._pending_batch_copies:
-            return {}
-        cpu_tensors, copy_done = self._pending_batch_copies.pop(0)
+    def recv_mtp_status_async(
+        self,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not self.pending_mtp_status_copies:
+            return None, None
+        cpu_num_rejected, cpu_num_bonus, copy_done = self.pending_mtp_status_copies.pop(
+            0
+        )
         copy_done.synchronize()
-        return cpu_tensors
-
-    def drain_prev_batch(self) -> None:
-        """Drain the previous step's batched D2H copy into CPU view attributes."""
-        cpu_tensors = self.recv_batch_from_cpu()
-        self.prev_sampled_tokens = cpu_tensors.get("sampled_tokens")
-        self.prev_sampled_logprobs = cpu_tensors.get("logprobs")
-        self.prev_draft_token_ids = cpu_tensors.get("draft_tokens")
-        self.prev_rejected_num = cpu_tensors.get("num_rejected")
-        self.prev_bonus_num = cpu_tensors.get("num_bonus")
+        return cpu_num_rejected.numpy(), cpu_num_bonus.numpy()
 
     def clean(self):
+        self.token_ids_cpu: list[torch.Tensor] = []
+        self.logprobs_cpu: list[Optional[torch.Tensor]] = []
+
         self.prev_batch: Optional[ScheduledBatch] = None
         self.prev_token_ids: Optional[torch.Tensor] = None
-        self.prev_req_ids: Optional[list[int]] = None
-
-        # Staged GPU tensors for the next batched D2H copy.
-        self._batch_gpu_tensors: dict[str, Optional[torch.Tensor]] = {}
-        # Queue of (cpu_tensors_dict, copy_done_event) — one entry per step.
-        self._pending_batch_copies: list[
-            tuple[dict[str, Optional[torch.Tensor]], torch.cuda.Event]
-        ] = []
-
-        # CPU views from the most recent batched D2H copy (previous step's output).
-        self.prev_sampled_tokens: Optional[torch.Tensor] = None
-        self.prev_sampled_logprobs: Optional[torch.Tensor] = None
-        self.prev_draft_token_ids: Optional[torch.Tensor] = None
-        self.prev_rejected_num: Optional[torch.Tensor] = None
-        self.prev_bonus_num: Optional[torch.Tensor] = None
-        self.num_rejected: Optional[np.ndarray] = None
 
         self.pre_num_decode_token_per_seq = 1
         self.draft_token_ids: Optional[torch.Tensor] = None
-        self.mapped_bonus_list: Optional[list[int]] = None
+        self.draft_token_ids_cpu: list[torch.Tensor] = []
+        # Queue of (cpu_num_rejected, cpu_num_bonus, copy_done_event) — async
+        # D2H copies fired by send_mtp_status_to_cpu_async, drained by
+        # recv_mtp_status_async after the event syncs.
+        self.pending_mtp_status_copies: list[
+            tuple[torch.Tensor, torch.Tensor, torch.cuda.Event]
+        ] = []
+        self.mapped_bonus_list: Optional[list[int]] = (
+            None  # Mapped to current batch order
+        )
+        self.num_rejected: Optional[np.ndarray] = None
+        self.num_bonus: Optional[np.ndarray] = None
 
     @staticmethod
     def _batch_process_token_ids(token_ids: list) -> list[tuple[int, ...]]:
@@ -213,6 +252,7 @@ class tokenIDProcessor:
         self,
         batch: ScheduledBatch,
         sampled_token_ids: torch.Tensor,
+        sync_event: torch.cuda.Event,
         sampled_logprobs: Optional[torch.Tensor] = None,
     ) -> tuple[dict[int, tuple[int, ...]], Optional[dict[int, float]]]:
         if not self.is_deferred_out:
@@ -232,19 +272,18 @@ class tokenIDProcessor:
                 }
             return ret, logprobs_map
 
-        # Use the previous step's sampled output (already copied to CPU by the
-        # batched recv in ModelRunner.postprocess) and stage the current step's
-        # output for the next batched send.
-        token_ids = self.prev_sampled_tokens
-        logprobs = self.prev_sampled_logprobs
-        self.stage_for_cpu("sampled_tokens", sampled_token_ids)
-        if sampled_logprobs is not None:
-            self.stage_for_cpu("logprobs", sampled_logprobs)
-
+        token_ids = self.recv_async_output(self.token_ids_cpu)
+        logprobs = self.recv_logprobs()
+        self.send_to_cpu_async(
+            sampled_token_ids,
+            self.token_ids_cpu,
+            sync_event,
+            gpu_logprobs=sampled_logprobs,
+        )
         token_id_dict = {}
         logprobs_map = None
         self.prev_req_ids = None
-        if self.prev_batch is not None and token_ids is not None:
+        if self.prev_batch is not None:
             self.prev_req_ids = self.prev_batch.req_ids
             token_ids_list = (
                 token_ids.tolist() if hasattr(token_ids, "tolist") else token_ids
@@ -255,11 +294,15 @@ class tokenIDProcessor:
                 processed = [(tid,) for tid in token_ids_list]
             token_id_dict = dict(zip(self.prev_req_ids, processed))
             if logprobs is not None:
-                logprobs_list = logprobs.tolist() if hasattr(logprobs, "tolist") else logprobs
                 logprobs_map = {
                     seq_id: logprob
-                    for seq_id, logprob in zip(self.prev_req_ids, logprobs_list)
+                    for seq_id, logprob in zip(self.prev_req_ids, logprobs)
                 }
+        else:
+            # first time, no previous tokens
+            token_ids = {}
+            logprobs_map = None
+
         self.prev_batch = batch
         self.prev_token_ids = sampled_token_ids
         token_id_dict[-1] = 1
@@ -313,8 +356,6 @@ class tokenIDProcessor:
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids.
         """
-        self.num_rejected = batch.num_rejected
-
         scheduled_tokens = batch.scheduled_tokens  # tokens per req
         total_tokens = batch.total_tokens_num
         total_tokens_prefill = batch.total_tokens_num_prefill
@@ -325,6 +366,8 @@ class tokenIDProcessor:
             :total_tokens_prefill
         ]
         self.input_ids.copy_to_gpu(total_tokens_prefill)
+
+        self.prev_rejected_num, self.prev_bonus_num = self.recv_mtp_status_async()
 
         # TODO: remove this when we support mixed prefill and decode in one batch
         if total_reqs_prefill > 0:
@@ -365,6 +408,18 @@ class tokenIDProcessor:
             tokens_per_seq = 1
             num_deferred_tokens = num_deferred_seqs
             num_new_tokens = num_new_seqs
+
+        # Receive and map bonus_list to current batch order
+        self.num_rejected = batch.num_rejected
+        self.num_bonus = batch.num_bonus
+        if num_deferred_seqs > 0 and self.prev_rejected_num is not None:
+            # Map: prev_bonus_list[prev_idx] → mapped_bonus_list[curr_idx]
+            self.num_rejected[deferred_curr_indices] = self.prev_rejected_num[
+                deferred_prev_indices
+            ]
+            self.num_bonus[deferred_curr_indices] = self.prev_bonus_num[
+                deferred_prev_indices
+            ]
 
         if is_all_same:
             # All requests are the same, only deferred tokens
@@ -488,15 +543,13 @@ class tokenIDProcessor:
         else:
             self.draft_token_ids = draft_token_ids
             self.pre_num_decode_token_per_seq = self.num_spec_tokens + 1
-            # Use the previous step's draft (already copied to CPU by the batched
-            # recv in ModelRunner.postprocess) and stage the current draft for the
-            # next batched send.
-            token_ids = self.prev_draft_token_ids
-            self.stage_for_cpu("draft_tokens", draft_token_ids)
-            if self.prev_req_ids is not None and token_ids is not None:
-                ret = token_ids.numpy()
-            else:
-                ret = np.array([], dtype=np.int32)
+            token_ids = self.recv_async_output_draft()
+            self.send_to_cpu_async_draft(draft_token_ids)
+            ret = (
+                token_ids
+                if self.prev_req_ids is not None
+                else np.array([], dtype=np.int32)
+            )
         return ret
 
 
@@ -788,6 +841,7 @@ class ModelRunner:
             distributed_init_method=distributed_init_method,
             data_parallel_size=config.parallel_config.data_parallel_size,
             data_parallel_rank=config.parallel_config.data_parallel_rank,
+            prefill_context_model_parallel_size=config.prefill_context_parallel_size,
         )
 
     def _make_buffer(
@@ -2152,13 +2206,11 @@ class ModelRunner:
             if get_tp_group().world_size > 1 and self.tokenID_processor.is_deferred_out:
                 sampled_logprobs = get_tp_group().broadcast(sampled_logprobs, src=0)
 
-        # Drain the previous step's batched D2H copy once. All deferred CPU data
-        # (sampled tokens, draft tokens, mtp status) arrives with a single event.
-        self.tokenID_processor.drain_prev_batch()
+        self.forward_done_event.record()
         # Capture before prepare_sampled_ids(), which advances self.prev_batch to current batch.
         prev_batch = self.tokenID_processor.prev_batch
         token_id_dict, logprobs_map = self.tokenID_processor.prepare_sampled_ids(
-            batch, sampled_tokens, sampled_logprobs=sampled_logprobs
+            batch, sampled_tokens, self.forward_done_event, sampled_logprobs
         )
         # Extract req_ids and token_ids from dict (key -1 is the is_deferred_out flag)
         req_ids_out = [k for k in token_id_dict if k != -1]
@@ -2169,9 +2221,9 @@ class ModelRunner:
             if hasattr(self, "drafter"):
                 prev_rejected_num = self.tokenID_processor.prev_rejected_num
                 prev_bonus_num = self.tokenID_processor.prev_bonus_num
-                # Stage the current step's MTP status for the single batched D2H copy.
-                self.tokenID_processor.stage_for_cpu("num_rejected", num_reject_tokens)
-                self.tokenID_processor.stage_for_cpu("num_bonus", next_token_locs)
+                self.tokenID_processor.send_mtp_status_to_cpu_async(
+                    num_reject_tokens, next_token_locs, self.forward_done_event
+                )  # Async copy to CPU
                 next_token_ids = torch.gather(
                     sampled_tokens.view(bs, -1), 1, next_token_locs.view(-1, 1)
                 ).view(bs)
@@ -2199,17 +2251,6 @@ class ModelRunner:
         else:
             prev_rejected_num = np.zeros(batch.total_seqs_num, dtype=np.int32)
             prev_bonus_num = np.zeros(batch.total_seqs_num, dtype=np.int32)
-
-        # Convert CPU tensors to numpy for the scheduler.  A single batched D2H
-        # copy is launched here for all data staged during this step.
-        if prev_rejected_num is not None and hasattr(prev_rejected_num, "numpy"):
-            prev_rejected_num = prev_rejected_num.numpy()
-        if prev_bonus_num is not None and hasattr(prev_bonus_num, "numpy"):
-            prev_bonus_num = prev_bonus_num.numpy()
-        # Record after all GPU work (including the draft proposer) is done so the
-        # async copy stream only starts copying once every staged tensor is ready.
-        self.forward_done_event.record()
-        self.tokenID_processor.send_batch_to_cpu(self.forward_done_event)
 
         return ScheduledBatchOutput(
             req_ids=req_ids_out,
